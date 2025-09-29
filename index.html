@@ -1,0 +1,278 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>QR Batch to PDF (Client‑side)</title>
+  <style>
+    :root { --gap: 10px; font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, Noto Sans, Helvetica, Arial, "Apple Color Emoji", "Segoe UI Emoji"; }
+    body { margin: 24px; }
+    h1 { font-size: 18px; margin: 0 0 12px; }
+    fieldset { border: 1px solid #ddd; border-radius: 12px; padding: 12px; margin-bottom: 16px; }
+    legend { padding: 0 6px; color: #444; }
+    label { display:block; font-size: 12px; color:#333; margin-top: 8px; }
+    input[type="number"], input[type="text"], select, textarea { width: 100%; box-sizing: border-box; padding: 8px; border-radius: 8px; border: 1px solid #ccc; }
+    textarea { height: 120px; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
+    .row { display: grid; gap: var(--gap); grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); }
+    .actions { display:flex; gap:12px; align-items:center; }
+    button { padding: 10px 14px; border-radius: 10px; border: 1px solid #ccc; background: #f7f7f7; cursor: pointer; }
+    button.primary { background: #111; color: #fff; border-color: #111; }
+    .hint { font-size: 12px; color:#666; }
+    .preview { border: 1px dashed #bbb; border-radius: 12px; padding: 8px; display:flex; gap:12px; align-items:center; }
+    .inline { display:flex; gap:8px; align-items:center; }
+    .small { font-size: 12px; color:#555; }
+  </style>
+  <!-- QR generator (canvas) -->
+  <script src="https://cdn.jsdelivr.net/npm/qrcodejs@1.0.0/qrcode.min.js"></script>
+  <!-- pdf-lib -->
+  <script src="https://cdn.jsdelivr.net/npm/pdf-lib@1.17.1/dist/pdf-lib.min.js"></script>
+</head>
+<body>
+  <h1>Client‑side QR Batch → PDF</h1>
+  <p class="hint">Paste URLs (one per line), choose a template (optional image or PDF), set QR position/size, and generate a PDF with one page per URL — all in the browser.</p>
+
+  <form id="form">
+    <fieldset>
+      <legend>Data</legend>
+      <label>URLs (one per line)
+        <textarea id="urls" placeholder="https://example.com/one\nhttps://example.com/two"></textarea>
+      </label>
+      <div class="row">
+        <label>Optional background template (PDF, PNG, or JPG)
+          <input id="templateFile" type="file" accept="application/pdf,image/png,image/jpeg" />
+        </label>
+        <label>Page size (if no PDF template)
+          <select id="pageSize">
+            <option value="A4">A4 (595 × 842 pt)</option>
+            <option value="Letter">Letter (612 × 792 pt)</option>
+            <option value="Custom">Custom…</option>
+          </select>
+        </label>
+        <label id="customSizeWrap" style="display:none;">
+          Custom size (pt): width × height
+          <div class="inline">
+            <input id="customW" type="number" min="100" value="595" />
+            <span>×</span>
+            <input id="customH" type="number" min="100" value="842" />
+          </div>
+        </label>
+      </div>
+    </fieldset>
+
+    <fieldset>
+      <legend>QR placement</legend>
+      <div class="row">
+        <label>QR size (pt)
+          <input id="qrSize" type="number" value="180" min="30" />
+        </label>
+        <label>Left (pt from page left)
+          <input id="posX" type="number" value="60" min="0" />
+        </label>
+        <label>Top (pt from page top)
+          <input id="posY" type="number" value="120" min="0" />
+        </label>
+      </div>
+      <div class="row">
+        <label>ECC level
+          <select id="ecc">
+            <option value="L">L (7%)</option>
+            <option value="M" selected>M (15%)</option>
+            <option value="Q">Q (25%)</option>
+            <option value="H">H (30%)</option>
+          </select>
+        </label>
+        <label>Quiet zone (modules)
+          <input id="margin" type="number" value="4" min="0" />
+        </label>
+        <label>Render URL text under QR?
+          <select id="renderText">
+            <option value="no" selected>No</option>
+            <option value="yes">Yes</option>
+          </select>
+        </label>
+      </div>
+      <div class="row">
+        <label>Text font size (pt)
+          <input id="fontSize" type="number" value="12" min="6" />
+        </label>
+        <label>Max URL chars (ellipsis)
+          <input id="maxChars" type="number" value="64" min="10" />
+        </label>
+      </div>
+      <p class="small">Tip: PDF user space is in points (pt). 72 pt ≈ 1 inch; 1 mm ≈ 2.835 pt. A4 = 595×842 pt.</p>
+    </fieldset>
+
+    <div class="actions">
+      <button class="primary" id="go" type="button">Generate PDF</button>
+      <a id="downloadLink" style="display:none;" download="qrs.pdf">Download PDF</a>
+      <span id="status" class="small"></span>
+    </div>
+  </form>
+
+  <div class="preview" id="templateInfo" style="display:none;"></div>
+
+  <!-- Hidden holder for QR (canvas) -->
+  <div id="qrHolder" style="position:absolute; left:-9999px; top:-9999px;"></div>
+
+<script>
+(async function(){
+  const { PDFDocument, rgb, StandardFonts } = PDFLib;
+  const $ = (id) => document.getElementById(id);
+
+  const state = { templateBytes: null, templateType: null, templateImage: null, templatePdf: null };
+
+  $('pageSize').addEventListener('change', () => {
+    $('customSizeWrap').style.display = $('pageSize').value === 'Custom' ? '' : 'none';
+  });
+
+  $('templateFile').addEventListener('change', async (e) => {
+    state.templateBytes = null; state.templateType = null; state.templateImage = null; state.templatePdf = null;
+    $('templateInfo').style.display = 'none';
+    const f = e.target.files?.[0];
+    if (!f) return;
+    const buf = await f.arrayBuffer();
+    state.templateBytes = new Uint8Array(buf);
+    if (f.type === 'application/pdf' || f.name.toLowerCase().endsWith('.pdf')) {
+      state.templateType = 'pdf';
+      const pdf = await PDFDocument.load(state.templateBytes);
+      state.templatePdf = pdf;
+      const p = pdf.getPages()[0];
+      showTemplateInfo(`PDF template loaded: ${f.name} — page size ${Math.round(p.getWidth())} × ${Math.round(p.getHeight())} pt`);
+    } else {
+      state.templateType = 'image';
+      const url = URL.createObjectURL(f);
+      const img = new Image();
+      img.onload = () => { showTemplateInfo(`Image template loaded: ${f.name} — ${img.naturalWidth} × ${img.naturalHeight} px`); URL.revokeObjectURL(url); };
+      img.src = url;
+      state.templateImage = await new Promise((res)=>{ img.onload = ()=>res(img); });
+    }
+  });
+
+  function showTemplateInfo(text){ const el = $('templateInfo'); el.textContent = text; el.style.display = ''; }
+
+  $('go').addEventListener('click', async () => {
+    try {
+      $('status').textContent = 'Generating…';
+      const urls = $('urls').value.split(/\r?\n/).map(s=>s.trim()).filter(Boolean);
+      if (urls.length === 0) throw new Error('Please paste at least one URL.');
+
+      const pdfDoc = await PDFDocument.create();
+      const font = await pdfDoc.embedFont(StandardFonts.Helvetica);
+
+      let pageW = 595, pageH = 842; // A4 default
+      if (state.templateType === 'pdf') {
+        const src = state.templatePdf;
+        const [srcPage] = await pdfDoc.copyPages(src, [0]);
+        pageW = srcPage.getWidth(); pageH = srcPage.getHeight();
+        for (let i=0;i<urls.length;i++) {
+          const [pCopy] = await pdfDoc.copyPages(src, [0]);
+          const page = pdfDoc.addPage([pageW, pageH]);
+          page.drawPage(pCopy);
+          await drawQrOnPage(pdfDoc, page, urls[i], font);
+        }
+      } else {
+        // Determine page size when using image or blank
+        if (state.templateType === 'image') {
+          // Scale image to page size according to selection (A4/Letter/Custom)
+          const sel = $('pageSize').value;
+          if (sel === 'Letter') { pageW = 612; pageH = 792; }
+          else if (sel === 'Custom') { pageW = Number($('customW').value)||595; pageH = Number($('customH').value)||842; }
+        } else {
+          const sel = $('pageSize').value;
+          if (sel === 'Letter') { pageW = 612; pageH = 792; }
+          else if (sel === 'Custom') { pageW = Number($('customW').value)||595; pageH = Number($('customH').value)||842; }
+        }
+        let bgBytes = null, bgRatio = 1;
+        if (state.templateType === 'image') {
+          // Convert image to PNG bytes for pdf-lib
+          const pngBytes = await imageElementToPngBytes(state.templateImage);
+          bgBytes = pngBytes;
+        }
+        for (const u of urls) {
+          const page = pdfDoc.addPage([pageW, pageH]);
+          // Draw background image (fit to page)
+          if (bgBytes) {
+            const png = await pdfDoc.embedPng(bgBytes);
+            const dims = png.scale(Math.min(pageW/png.width, pageH/png.height));
+            // center-fit
+            page.drawImage(png, { x: (pageW - dims.width)/2, y: (pageH - dims.height)/2, width: dims.width, height: dims.height });
+          }
+          await drawQrOnPage(pdfDoc, page, u, font);
+        }
+      }
+
+      const pdfBytes = await pdfDoc.save();
+      const blob = new Blob([pdfBytes], { type: 'application/pdf' });
+      const url = URL.createObjectURL(blob);
+      const a = $('downloadLink');
+      a.href = url; a.style.display = ''; a.textContent = 'Download PDF (' + urls.length + ' pages)';
+      $('status').textContent = 'Done.';
+    } catch (err) {
+      console.error(err);
+      $('status').textContent = 'Error: ' + err.message;
+    }
+  });
+
+  async function drawQrOnPage(pdfDoc, page, urlText, font){
+    const size = Number($('qrSize').value)||180;
+    const posX = Number($('posX').value)||0;
+    const posY = Number($('posY').value)||0;
+    const ecc = $('ecc').value;
+    const margin = Math.max(0, Number($('margin').value)||0);
+    const showText = $('renderText').value === 'yes';
+    const fontSize = Number($('fontSize').value)||12;
+    const maxChars = Number($('maxChars').value)||64;
+
+    // Generate QR on a temporary canvas via qrcodejs
+    const holder = document.createElement('div');
+    $('qrHolder').appendChild(holder);
+    const qr = new QRCode(holder, {
+      text: urlText,
+      width: size,
+      height: size,
+      correctLevel: QRCode.CorrectLevel[ecc],
+      // qrcodejs does not expose quiet zone, so we pad manually by drawing onto a larger canvas
+    });
+    await tick(); // allow canvas render
+
+    const canvas = holder.querySelector('canvas');
+    // Manual quiet zone: draw current canvas onto a padded canvas
+    const padded = document.createElement('canvas');
+    const scale = size / canvas.width; // usually 1
+    const moduleMargin = margin; // modules; approximate by pixels (qrcodejs uses modules = pixels at given size)
+    const padPx = Math.round(moduleMargin * (canvas.width / 41)); // 41 is typical module count for mid versions; heuristic
+    padded.width = canvas.width + padPx*2;
+    padded.height = canvas.height + padPx*2;
+    const ctx = padded.getContext('2d');
+    ctx.fillStyle = '#fff';
+    ctx.fillRect(0,0,padded.width,padded.height);
+    ctx.drawImage(canvas, padPx, padPx);
+
+    const dataUrl = padded.toDataURL('image/png');
+    $('qrHolder').removeChild(holder);
+
+    const png = await pdfDoc.embedPng(dataUrl);
+    page.drawImage(png, { x: posX, y: page.getHeight() - posY - size, width: size, height: size });
+
+    if (showText) {
+      const text = ellipsize(urlText, maxChars);
+      page.drawText(text, { x: posX, y: page.getHeight() - posY - size - (fontSize + 6), size: fontSize, font, color: rgb(0,0,0) });
+    }
+  }
+
+  function ellipsize(s, n){ if (s.length <= n) return s; return s.slice(0, Math.max(0, n-1)) + '…'; }
+  function tick(){ return new Promise(r => setTimeout(r, 0)); }
+
+  async function imageElementToPngBytes(img){
+    const canvas = document.createElement('canvas');
+    canvas.width = img.naturalWidth; canvas.height = img.naturalHeight;
+    const ctx = canvas.getContext('2d');
+    ctx.drawImage(img, 0, 0);
+    const dataUrl = canvas.toDataURL('image/png');
+    const res = await fetch(dataUrl);
+    return new Uint8Array(await res.arrayBuffer());
+  }
+})();
+</script>
+</body>
+</html>
