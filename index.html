@@ -160,17 +160,21 @@
       const font = await pdfDoc.embedFont(StandardFonts.Helvetica);
 
       let pageW = 595, pageH = 842; // A4 default
-      if (state.templateType === 'pdf') {
-        const src = state.templatePdf;
-        const [srcPage] = await pdfDoc.copyPages(src, [0]);
-        pageW = srcPage.getWidth(); pageH = srcPage.getHeight();
-        for (let i=0;i<urls.length;i++) {
-          const [pCopy] = await pdfDoc.copyPages(src, [0]);
-          const page = pdfDoc.addPage([pageW, pageH]);
-          page.drawPage(pCopy);
-          await drawQrOnPage(pdfDoc, page, urls[i], font);
-        }
-      } else {
+if (state.templateType === 'pdf') {
+  const src = state.templatePdf;
+  const first = src.getPages()[0];
+  pageW = first.getWidth();
+  pageH = first.getHeight();
+
+  // Embed the template page ONCE, reuse for all pages
+  const [embedded] = await pdfDoc.embedPdf(state.templateBytes, [0]);
+
+  for (const u of urls) {
+    const page = pdfDoc.addPage([pageW, pageH]);
+    page.drawPage(embedded, { x: 0, y: 0, width: pageW, height: pageH });
+    await drawQrOnPage(pdfDoc, page, u, font);
+  }
+} else {
         // Determine page size when using image or blank
         if (state.templateType === 'image') {
           // Scale image to page size according to selection (A4/Letter/Custom)
